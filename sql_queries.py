@@ -40,21 +40,21 @@ CREATE TABLE IF NOT EXISTS artists (
 
 time_table_create = ("""
 CREATE TABLE IF NOT EXISTS time (
-    start_time NUMERIC, 
-    hour INT, 
-    day INT, 
-    week INT, 
-    month INT, 
-    year INT, 
-    weekday INT
+    start_time TIMESTAMP PRIMARY KEY NOT NULL, 
+    hour INT NOT NULL, 
+    day INT NOT NULL, 
+    week INT NOT NULL, 
+    month INT NOT NULL, 
+    year INT NOT NULL, 
+    weekday INT NOT NULL
 )
 """)
 
 songplay_table_create = ("""
 CREATE TABLE IF NOT EXISTS songplays (
     songplay_id SERIAL PRIMARY KEY, 
-    start_time NUMERIC, 
-    user_id INT, 
+    start_time TIMESTAMP NOT NULL, 
+    user_id INT NOT NULL, 
     song_id TEXT, 
     artist_id TEXT, 
     session_id INT, 
@@ -73,7 +73,7 @@ songplay_table_insert = ("""
 user_table_insert = ("""
     INSERT INTO users (user_id, first_name, last_name, gender, level)
     VALUES (%s, %s, %s, %s, %s)
-    ON CONFLICT (user_id) DO NOTHING;
+    ON CONFLICT (user_id) DO UPDATE SET level = EXCLUDED.level;
 """)
 
 song_table_insert = ("""
@@ -89,10 +89,13 @@ artist_table_insert = ("""
 """)
 
 
+# Ignoring conflict as none of the properties would change if there's duplicate start_time since all other properties are extracted from start_time
 time_table_insert = ("""
     INSERT INTO time (start_time, hour, day, week, month, year, weekday)
-    VALUES (%s, %s, %s, %s, %s, %s, %s);
+    VALUES (%s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (start_time) DO NOTHING; 
 """)
+
 
 # FIND SONGS
 

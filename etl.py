@@ -1,3 +1,4 @@
+from datetime import time
 import os
 import glob
 import psycopg2
@@ -6,16 +7,38 @@ import numpy as np
 from io import StringIO
 from sql_queries import *
 
-def insert_df_to_postgres(cur, insert_query, df):
-    for data in df.values:
-        cur.execute(insert_query, data)
-        
+# UTILITY FUNCTIONS
+def set_empty_defaults_df(df):
+    """Sets -1 as a default value for any int or float types in a DataFrame when its NaN"""
+    if df is None: return
+    for col in df:
+        #get type for column
+        dt = df[col].dtype
+        # if int or float, set -1
+        if dt in [int, float]:
+            df[col].fillna(-1, inplace=True)
+
+    return df
+
+def get_files(filepath):
+    """Helper function to recursively fetch a list of files from any folder"""
+    all_files = []
+    for root, dirs, files in os.walk(filepath):
+        files = glob.glob(os.path.join(root,'*.json'))
+        for f in files :
+            all_files.append(os.path.abspath(f))
+    
+    return all_files
+
+# DATABASE UTILITY FUNCTIONS
 def run_query(conn, query):
+    """This helps to run any query on the connected postgres instance"""
     with conn.cursor() as cur:
         cur.execute(query)
         conn.commit()
 
-def copy(conn, table, df, useIndex=False):
+def bulk_insert_postgres(conn, table, df, useIndex=False):
+    """ Helper function to insert all data inside a DF in bulk. Uses PostgreSQL COPY FROM functionality. """
     sio = StringIO()
     
     # Handle NaN
@@ -33,8 +56,10 @@ def copy(conn, table, df, useIndex=False):
             sep="|"
         )
         conn.commit()
-            
+
+# PROCESSOR FUNCTIONS
 def fetch_time_df(df, prop):
+    """Extracts datetime related properties from a timestamp column in a DF"""
     # convert timestamp column to datetime
     t = pd.to_datetime(df[prop], unit='ms')
 
@@ -43,7 +68,7 @@ def fetch_time_df(df, prop):
     # insert time data records
     time_data = [
         [
-            time.value / 1000000,
+            time,
             int(time.hour),
             int(time.day),
             int(time.week),
@@ -57,18 +82,20 @@ def fetch_time_df(df, prop):
     time_df = pd.DataFrame(np.array(time_data), columns=column_labels)
 
     # all properties are in float, convert to int
-    time_df['start_time'] = time_df['start_time'].apply(np.int64)
     time_df['hour'] = time_df['hour'].apply(np.int64)
     time_df['day'] = time_df['day'].apply(np.int64)
     time_df['week'] = time_df['week'].apply(np.int64)
     time_df['month'] = time_df['month'].apply(np.int64)
     time_df['year'] = time_df['year'].apply(np.int64)
     time_df['weekday'] = time_df['weekday'].apply(np.int64)
+    
+    # Remove duplicates
+    time_df.drop_duplicates(subset=['start_time'], keep='first', inplace=True)
 
     return time_df
 
 def process_logs(conn, df):
-        
+    """Processes logs data and inserts into PostgreSQL"""
     # filter by NextSong action
     df = df.loc[df['page'] == 'NextSong']
         
@@ -78,7 +105,7 @@ def process_logs(conn, df):
         
     # Insert timestamp data
     print("Insert time data...")
-    copy(conn, "time", time_df)
+    bulk_insert_postgres(conn, "time", time_df)
     
     # load user table
     print("Load user data...")
@@ -89,16 +116,16 @@ def process_logs(conn, df):
     
     # Insert user data
     print("Insert users data...")
-    copy(conn, "users", user_df)
+    bulk_insert_postgres(conn, "users", user_df)
     
     print("Load songplay data..")
     songplay_df = extract_songplays(conn, df)
     
-    print("Insert songplat data..")
-    copy(conn, "songplays", songplay_df, useIndex=True)
+    bulk_insert_postgres(conn, "songplays", songplay_df, useIndex=True)
 
 
 def extract_songplays(conn, df):
+    """Extracts songplay data by associating each songplay with artistid and songid"""
     with conn.cursor() as cur:
         songplay_data = []
         # insert songplay records
@@ -109,22 +136,13 @@ def extract_songplays(conn, df):
             results = cur.fetchone()
 
             songid, artistid = results or (None, None)
-            songplay_data.append([row.ts, row.userId, songid, artistid, row.sessionId, row.location, row.userAgent])
+            songplay_data.append([pd.to_datetime(row.ts, unit='ms'), row.userId, songid, artistid, row.sessionId, row.location, row.userAgent])
 
         column_labels = ('start_time', 'user_id', 'song_id', 'artist_id', 'session_id', 'location', 'user_agent')
         return pd.DataFrame(np.array(songplay_data), columns=column_labels)
 
-def get_files(filepath):
-    all_files = []
-    for root, dirs, files in os.walk(filepath):
-        files = glob.glob(os.path.join(root,'*.json'))
-        for f in files :
-            all_files.append(os.path.abspath(f))
-    
-    return all_files
-        
-    
-def process_songs(conn, df):    
+def process_songs(conn, df): 
+    """Processes song and artist data and inserts into PostgreSQL"""   
     # load songs data
     print("Loading songs...")
     songs_columns = ['song_id', 'title', 'artist_id', 'year', 'duration']
@@ -132,7 +150,7 @@ def process_songs(conn, df):
     
     # insert song record
     print("Inserting songs...")
-    copy(conn, "songs", song_df)
+    bulk_insert_postgres(conn, "songs", song_df)
     
     # load artists data
     print("Loading artists...")
@@ -140,10 +158,11 @@ def process_songs(conn, df):
         
     # insert artists data
     print("Inserting artists..")
-    copy(conn, "artists", artist_df)
+    bulk_insert_postgres(conn, "artists", artist_df)
     
 
 def process_data(conn, filepath, func):
+    """Fetches all json data inside a folder recursively and calls a processor function for downstream processing"""
     files = get_files(filepath)
 
     dfs = [pd.read_json(file, lines=True) for file in files]
@@ -153,18 +172,7 @@ def process_data(conn, filepath, func):
     func(conn, df)
     conn.commit()
 
-    
-def set_empty_defaults_df(df):
-    for col in df:
-        #get type for column
-        dt = df[col].dtype
-        # if int or float, set -1
-        if dt in [int, float]:
-            df[col].fillna(-1, inplace=True)
-
-    return df
-
-    
+# ENTRYPOINT
 def main():
     conn = psycopg2.connect("host=127.0.0.1 dbname=sparkifydb user=postgres password=student")
 
